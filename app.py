@@ -5,30 +5,40 @@ import threading
 
 app = Flask(__name__)
 
-TOKEN = os.getenv('TOKEN', '8155890509:AAFoFKE40Q1fcdldRcnMmI69dkte7LgvTyY')
-CHAT_ID = os.getenv('CHAT_ID', '-100xxxxxxxxxx')  # ОБЯЗАТЕЛЬНО с минусом для группы!
+TOKEN = os.getenv('TOKEN')
+CHAT_ID = os.getenv('CHAT_ID')  # Обязательно с -100... для группы!
 
 def send_to_telegram(audio_url, caller, duration):
-    if not audio_url:
+    if not audio_url or not TOKEN or not CHAT_ID:
+        print("Нет аудио или неверные TOKEN/CHAT_ID")
         return
+    
     try:
-        print(f"Скачиваем аудио: {audio_url}")
-        audio_response = requests.get(audio_url, timeout=60)
+        print(f"Скачиваем запись: {audio_url}")
+        audio_response = requests.get(audio_url, timeout=90)
         audio_response.raise_for_status()
         audio_file = audio_response.content
         
         caption = f"Новый звонок от {caller}\nДлительность: {duration} сек"
+        
         files = {'audio': ('recording.mp3', audio_file, 'audio/mpeg')}
         params = {'chat_id': CHAT_ID, 'caption': caption}
+        send_url = f'https://api.telegram.org/bot{TOKEN}/sendAudio'
         
-        send_url = 'https://api.telegram.org/bot{TOKEN}/sendAudio'
-        response = requests.post(send_url, data=params, files=files, timeout=60)
-        print("Ответ Telegram:", response.json())
-        
+        resp = requests.post(send_url, data=params, files=files, timeout=90)
+        if resp.ok:
+            print("Аудио успешно отправлено в Telegram")
+        else:
+            print("Ошибка Telegram API:", resp.json())
+            
     except Exception as e:
-        print(f"Ошибка отправки: {str(e)}")
-        requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',
-                      data={'chat_id': CHAT_ID, 'text': f"Ошибка: {str(e)}\nСсылка: {audio_url}"})
+        print(f"Ошибка при отправке: {str(e)}")
+        # Fallback — отправляем ссылку текстом
+        try:
+            requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',
+                          data={'chat_id': CHAT_ID, 'text': f"Ошибка отправки аудио: {str(e)}\nСсылка: {audio_url}"})
+        except:
+            pass
 
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
@@ -36,24 +46,28 @@ def webhook():
         return 'OK', 200
     
     if request.method == 'POST':
-        print("Получен POST-запрос от Calltouch")  # Лог для отладки
+        print("Получен POST от Calltouch")
         
-        # МГНОВЕННО отвечаем успехом — это пройдёт тест!
-        threading.Thread(target=lambda: process_data(request.get_json(force=True))).start()
+        # Извлекаем JSON сразу в основной функции (пока контекст жив)
+        try:
+            data = request.get_json(force=True) or {}
+        except:
+            data = {}
         
-        return jsonify({'status': 'ok'}), 200  # Многие сервисы ожидают такой формат!
-
-def process_data(data):
-    if not data:
-        print("Пустой JSON — это был тест Calltouch")
-        return
-    
-    print("Данные звонка:", data)
-    audio_url = data.get('reclink')
-    caller = data.get('callerNumber', 'Неизвестный')
-    duration = data.get('duration', 'Неизвестно')
-    
-    send_to_telegram(audio_url, caller, duration)
+        print("Данные звонка:", data)
+        
+        audio_url = data.get('reclink')
+        caller = data.get('callerNumber', 'Неизвестный')
+        duration = data.get('duration', 'Неизвестно')
+        
+        # Запускаем отправку в фоне, передавая данные явно (не через request!)
+        if audio_url:
+            threading.Thread(target=send_to_telegram, args=(audio_url, caller, duration), daemon=True).start()
+        else:
+            print("Нет reclink — возможно, тестовый запрос или запись отключена")
+        
+        # Мгновенный ответ Calltouch
+        return jsonify({'status': 'ok'}), 200
 
 @app.route('/')
 def home():
